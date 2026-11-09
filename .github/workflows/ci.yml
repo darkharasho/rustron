@@ -1,0 +1,121 @@
+# Rustron M1 CI: build, test and package on Linux and Windows.
+#
+# Prerequisites mirror Servo at rev 75d20deef (the libservo pin in crates/rustron-host):
+#   - Linux apt packages: python/servo/platform/linux_packages/apt/apt_common.txt and
+#     apt_ubuntu_only.txt, minus the gstreamer/wpt-only entries (rustron-host builds servo with
+#     default-features = false, so there is no media backend).
+#   - LLVM/clang 20.1 via KyleMayes/install-llvm-action and LIBCLANG_PATH: .github/workflows/
+#     linux-common.yml (lib dir on Linux) and windows.yml (bin dir on Windows).
+#   - Windows: python/servo/platform/windows.py + windows/winget.json list CMake, LLVM, Ninja
+#     (all preinstalled or installed below) and "moztools" 4.0, which mozjs_sys 153.6.0-2
+#     (build.rs find_moztools) locates through MOZTOOLS_PATH. The capi job in windows.yml sets
+#     CC/CXX=clang-cl.exe and MOZTOOLS_PATH the same way. WiX and gstreamer are for Servo's own
+#     installer and media, not needed here.
+#   - Toolchain: rust-toolchain.toml (copy of Servo's, 1.99.1) is honoured by rustup.
+#
+# Runtime files: rustron-host enables servo's "bundled" feature (-> baked-in-resources), so the
+# Servo resources/ directory is compiled into the binary and is NOT shipped in the artifact.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux
+            exe: ""
+          - os: windows-latest
+            name: windows
+            exe: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake curl g++ git gperf m4 \
+            libdbus-1-dev libfreetype6-dev libgl1-mesa-dri libgles2-mesa-dev \
+            libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev \
+            libvulkan1 libx11-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxmu-dev libxmu6 libegl1-mesa-dev llvm-dev \
+            xorg-dev libxkbcommon0 libxkbcommon-x11-0 mesa-vulkan-drivers \
+            fonts-lato fonts-liberation fonts-noto-color-emoji fonts-dejavu-core \
+            fonts-dejavu-extra
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "20.1"
+          directory: ${{ runner.temp }}/llvm
+
+      - name: Set LIBCLANG_PATH (Linux)
+        if: runner.os == 'Linux'
+        run: echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $llvm_bin = Join-Path $env:LLVM_PATH "bin"
+          "LIBCLANG_PATH=$llvm_bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$llvm_bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install MozTools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Same download as python/servo/platform/windows.py (DEPS_URL + moztools-4.0.zip).
+          $dest = Join-Path $env:RUNNER_TEMP "moztools"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zip = Join-Path $dest "moztools-4.0.zip"
+          Invoke-WebRequest -Uri "https://github.com/servo/servo-build-deps/releases/download/msvc-deps/moztools-4.0.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = Join-Path $dest "moztools-4.0"
+          if (-not (Test-Path (Join-Path $root "msys2/usr/bin"))) { throw "moztools layout unexpected under $dest" }
+          "MOZTOOLS_PATH=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC=clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=clang-cl.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        shell: bash
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version
+
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: ~/.cargo
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build release
+        run: cargo build --release -p rustron-host -p rustron-bench
+
+      - name: Collect artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/rustron-host${{ matrix.exe }}" "target/release/rustron-bench${{ matrix.exe }}" dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustron-m1-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
