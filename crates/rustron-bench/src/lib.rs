@@ -1,5 +1,8 @@
 //! Bench statistics and parity-gate rules for comparing Rustron with Electron.
 pub mod gate;
+pub mod prepare;
+pub mod proc_tree;
+pub mod report_server;
 pub mod stats;
 
 use serde::{Deserialize, Serialize};
