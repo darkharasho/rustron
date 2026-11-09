@@ -15,6 +15,7 @@ url = "2"
 
 [target.'cfg(windows)'.dependencies]
 win32job = "2"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 ureq = "2"

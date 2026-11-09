@@ -5130,6 +5130,7 @@ dependencies = [
  "ureq",
  "url",
  "win32job",
+ "windows 0.61.3",
 ]
 
 [[package]]

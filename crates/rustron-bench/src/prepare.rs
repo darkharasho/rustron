@@ -28,10 +28,12 @@ pub fn relax_csp(html: &str) -> String {
         return html.to_string();
     };
     let Some(c_rel) = html[meta_at..].find("content=\"") else {
+        eprintln!("warning: CSP meta found but its content attribute is not double-quoted; leaving it unrewritten");
         return html.to_string();
     };
     let start = meta_at + c_rel + "content=\"".len();
     let Some(len) = html[start..].find('"') else {
+        eprintln!("warning: CSP meta content attribute is unterminated; leaving it unrewritten");
         return html.to_string();
     };
     let csp = &html[start..start + len];
