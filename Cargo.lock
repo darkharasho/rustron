@@ -5096,6 +5096,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustron-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "rustron-host"
 version = "0.0.1"
 dependencies = [
