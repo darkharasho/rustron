@@ -8,7 +8,18 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PROBE_JS: &str = include_str!("../../../bench/probe.js");
-const ELECTRON_BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/electron-base");
+// The Electron launcher app is embedded and written out per run, so the shipped binary does not
+// depend on the source tree it was built from.
+const ELECTRON_BASE_PACKAGE_JSON: &str = include_str!("../../../bench/electron-base/package.json");
+const ELECTRON_BASE_MAIN_JS: &str = include_str!("../../../bench/electron-base/main.js");
+
+fn write_electron_base(run_dir: &Path) -> Result<PathBuf> {
+    let base = run_dir.join(".rustron-electron-base");
+    std::fs::create_dir_all(&base)?;
+    std::fs::write(base.join("package.json"), ELECTRON_BASE_PACKAGE_JSON)?;
+    std::fs::write(base.join("main.js"), ELECTRON_BASE_MAIN_JS)?;
+    Ok(base)
+}
 
 struct Args {
     fixture: PathBuf,
@@ -99,12 +110,13 @@ fn run_once(args: &Args, engine: Engine) -> Result<RunResult> {
                 .append_pair("engine", "electron")
                 .append_pair("t0", &t0.to_string())
                 .append_pair("report", &server.url());
+            let base = write_electron_base(run_dir.path())?;
             let mut c = Command::new(&args.electron);
             // Electron 44 hangs before 'ready' on native Wayland on the dev machine; XWayland works.
             // The ozone platform has to be chosen on the command line, before main.js runs.
             #[cfg(target_os = "linux")]
             c.arg("--ozone-platform=x11");
-            c.arg(ELECTRON_BASE).env("RUSTRON_BENCH_URL", u.as_str());
+            c.arg(&base).env("RUSTRON_BENCH_URL", u.as_str());
             ("electron", c)
         }
     };
