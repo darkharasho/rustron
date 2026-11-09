@@ -15,6 +15,9 @@ servo = { git = "https://github.com/servo/servo", rev = "75d20deef", default-fea
 url = "2"
 winit = "0.30.13"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+
 [target.'cfg(windows)'.dependencies]
 # servoshell enables this on Windows (ANGLE instead of WGL).
 servo = { git = "https://github.com/servo/servo", rev = "75d20deef", default-features = false, features = ["no-wgl"] }

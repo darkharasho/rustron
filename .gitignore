@@ -1,4 +1,4 @@
 target/
 bench/fixtures/
-results/
+/results/
 .superpowers/

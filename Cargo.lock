@@ -5102,6 +5102,7 @@ dependencies = [
  "anyhow",
  "euclid",
  "http",
+ "libloading",
  "percent-encoding",
  "rustls",
  "servo",

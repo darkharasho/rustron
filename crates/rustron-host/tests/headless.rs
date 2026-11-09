@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use rustron_host::servo_window::{run_headless, HostOptions};
+use rustron_host::servo_window::{run_headless, run_headless_capture, HostOptions};
 
+const CHILD_MARKER: &str = "RUSTRON_CHILD_BODY_RAN:";
 const CHILD_ENV: &str = "RUSTRON_HEADLESS_TEST_CHILD";
 
 /// Servo can only be initialised once per process (its options are a process-wide global),
@@ -13,6 +14,7 @@ const CHILD_ENV: &str = "RUSTRON_HEADLESS_TEST_CHILD";
 fn isolated(name: &str, body: impl FnOnce()) {
     if std::env::var_os(CHILD_ENV).is_some() {
         body();
+        println!("{CHILD_MARKER}{name}");
         return;
     }
     let out = Command::new(std::env::current_exe().unwrap())
@@ -25,6 +27,12 @@ fn isolated(name: &str, body: impl FnOnce()) {
         "child failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
+    );
+    // `--exact` with a drifted name runs 0 tests and exits 0; the marker proves the body ran.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!("{CHILD_MARKER}{name}")),
+        "child did not run the test body (name drift?)\nstdout:\n{stdout}"
     );
 }
 
@@ -66,5 +74,21 @@ fn headless_times_out_cleanly() {
         );
         assert!(res.is_err(), "expected timeout error, got {res:?}");
         assert!(start.elapsed() < Duration::from_secs(10));
+    });
+}
+
+#[test]
+fn headless_paints_page_content() {
+    isolated("headless_paints_page_content", || {
+        let (title, image) = run_headless_capture(
+            opts("paint-app", "app://app/index.html"),
+            "ok:",
+            Duration::from_secs(60),
+        )
+        .expect("capture");
+        assert_eq!(title, "ok:paint");
+        // body background is #c33 = (204, 51, 51); sample away from the text.
+        let px = image.get_pixel(790, 590).0;
+        assert_eq!(px[..3], [204, 51, 51], "painted pixel was {px:?}");
     });
 }

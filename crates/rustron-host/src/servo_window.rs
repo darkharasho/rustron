@@ -17,12 +17,13 @@ use http::{HeaderMap, StatusCode};
 use servo::protocol_handler::{
     DoneChannel, FetchContext, NetworkError, ProtocolHandler, ProtocolRegistry, Request, Response,
 };
+use servo::{DeviceIntRect, DeviceIntSize, DevicePoint, WebResourceResponse};
 use servo::{
     EventLoopWaker, InputEvent, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent,
-    RenderingContext, Servo, ServoBuilder, SoftwareRenderingContext, WebView, WebViewBuilder,
-    WebViewDelegate, WebResourceLoad, WheelDelta, WheelEvent, WheelMode, WindowRenderingContext,
+    RenderingContext, RgbaImage, Servo, ServoBuilder, SoftwareRenderingContext, WebResourceLoad,
+    WebView, WebViewBuilder, WebViewDelegate, WheelDelta, WheelEvent, WheelMode,
+    WindowRenderingContext,
 };
-use servo::{DevicePoint, WebResourceResponse};
 use url::Url;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -59,9 +60,11 @@ impl ProtocolHandler for AppSchemeHandler {
         _done_chan: &mut DoneChannel,
         _context: &FetchContext,
     ) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>> {
-        Box::pin(future::ready(Response::network_error(NetworkError::ResourceLoadError(
-            "app:// load was not intercepted by the embedder".into(),
-        ))))
+        Box::pin(future::ready(Response::network_error(
+            NetworkError::ResourceLoadError(
+                "app:// load was not intercepted by the embedder".into(),
+            ),
+        )))
     }
 
     fn is_fetchable(&self) -> bool {
@@ -98,7 +101,8 @@ impl WebViewDelegate for AppDelegate {
         let response = self.protocol.respond(&url);
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(response.mime));
-        let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let status =
+            StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let reason = status.canonical_reason().unwrap_or("").as_bytes().to_vec();
         let mut intercepted = load.intercept(
             WebResourceResponse::new(url)
@@ -156,6 +160,16 @@ pub fn run_headless(
     wait_for_title_prefix: &str,
     timeout: Duration,
 ) -> anyhow::Result<String> {
+    run_headless_capture(opts, wait_for_title_prefix, timeout).map(|(title, _)| title)
+}
+
+/// Like `run_headless`, but also returns what Servo painted: after the title appears it keeps
+/// painting (up to 5s) until the frame has a non-white pixel, then reads it back.
+pub fn run_headless_capture(
+    opts: HostOptions,
+    wait_for_title_prefix: &str,
+    timeout: Duration,
+) -> anyhow::Result<(String, RgbaImage)> {
     init_crypto();
     let (width, height) = opts.window_size;
     let context = Rc::new(
@@ -177,17 +191,29 @@ pub fn run_headless(
         .delegate(delegate.clone())
         .build();
 
+    // Paints a frame and reads it back before presenting (present swaps the buffers).
+    let paint = || {
+        let _ = context.make_current();
+        webview.paint();
+        let rect = DeviceIntRect::from_size(DeviceIntSize::new(width as i32, height as i32));
+        let image = context.read_to_image(rect);
+        context.present();
+        image
+    };
+
     let deadline = Instant::now() + timeout;
     let mut seen = 0;
-    loop {
+    let title = loop {
         servo.spin_event_loop();
         if delegate.frame_ready.replace(false) {
-            webview.paint();
-            context.present();
+            paint();
         }
         let titles = delegate.titles.borrow();
-        if let Some(found) = titles[seen..].iter().find(|t| t.starts_with(wait_for_title_prefix)) {
-            return Ok(found.clone());
+        if let Some(found) = titles[seen..]
+            .iter()
+            .find(|t| t.starts_with(wait_for_title_prefix))
+        {
+            break found.clone();
         }
         seen = titles.len();
         drop(titles);
@@ -200,6 +226,24 @@ pub fn run_headless(
         }
         // Sleep until Servo wakes us, but never past the deadline.
         let _ = rx.recv_timeout((deadline - now).min(Duration::from_millis(50)));
+    };
+
+    let paint_deadline = Instant::now() + Duration::from_secs(5);
+    let mut last = None;
+    loop {
+        servo.spin_event_loop();
+        if delegate.frame_ready.replace(false) {
+            last = paint().or(last);
+        }
+        let painted = last.as_ref().is_some_and(|img| {
+            img.pixels()
+                .any(|p| p.0[3] != 0 && p.0[..3] != [255, 255, 255])
+        });
+        if painted || Instant::now() >= paint_deadline {
+            let image = last.ok_or_else(|| anyhow!("no frame was painted"))?;
+            return Ok((title, image));
+        }
+        let _ = rx.recv_timeout(Duration::from_millis(20));
     }
 }
 
@@ -220,6 +264,38 @@ impl EventLoopWaker for WinitWaker {
         let _ = self.0.send_event(WakerEvent);
     }
 }
+
+/// On Linux/Wayland, `eglSwapBuffers` with swap interval 1 blocks until the compositor sends a
+/// frame callback. That callback is dispatched by the same thread that is blocked in the swap
+/// (the winit event loop), so the first presented frame freezes the window and the page never
+/// finishes loading (observed with the NVIDIA EGL Wayland driver on KDE). Servo paints only
+/// when a frame is ready, so swapping without vsync is fine. Best effort: failures are ignored.
+#[cfg(target_os = "linux")]
+fn disable_blocking_swap() {
+    use std::ffi::c_void;
+    type GetCurrentDisplay = unsafe extern "C" fn() -> *mut c_void;
+    type SwapInterval = unsafe extern "C" fn(*mut c_void, i32) -> u32;
+    // Safety: standard EGL entry points with their documented C signatures; the library
+    // outlives the calls and EGL is already loaded by Servo's surfman.
+    unsafe {
+        let Ok(lib) = libloading::Library::new("libEGL.so.1") else {
+            return;
+        };
+        let (Ok(get_display), Ok(swap_interval)) = (
+            lib.get::<GetCurrentDisplay>(b"eglGetCurrentDisplay\0"),
+            lib.get::<SwapInterval>(b"eglSwapInterval\0"),
+        ) else {
+            return;
+        };
+        let display = get_display();
+        if !display.is_null() {
+            swap_interval(display, 0);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disable_blocking_swap() {}
 
 struct Running {
     // Must outlive the rendering context.
@@ -261,12 +337,15 @@ impl WindowApp {
             .make_current()
             .map_err(|e| anyhow!("making the rendering context current failed: {e:?}"))?;
 
+        disable_blocking_swap();
+
         let servo = ServoBuilder::default()
             .event_loop_waker(Box::new(self.waker.clone()))
             .protocol_registry(protocol_registry()?)
             .build();
         let redraw_window = window.clone();
-        let delegate = AppDelegate::new(&self.opts, Box::new(move || redraw_window.request_redraw()))?;
+        let delegate =
+            AppDelegate::new(&self.opts, Box::new(move || redraw_window.request_redraw()))?;
         let webview = WebViewBuilder::new(&servo, context.clone())
             .url(self.opts.url.clone())
             .hidpi_scale_factor(euclid::Scale::new(window.scale_factor() as f32))
@@ -305,22 +384,46 @@ impl ApplicationHandler<WakerEvent> for WindowApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(state) = self.state.as_mut() else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         state.servo.spin_event_loop();
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
+                let _ = state.context.make_current();
                 state.webview.paint();
+                if std::env::var_os("RUSTRON_DEBUG_PAINT").is_some() {
+                    let size = state.context.size();
+                    let rect = DeviceIntRect::from_size(DeviceIntSize::new(
+                        size.width as i32,
+                        size.height as i32,
+                    ));
+                    let px = state
+                        .context
+                        .read_to_image(rect)
+                        .map(|i| i.get_pixel(size.width / 2, size.height / 2).0);
+                    eprintln!("rustron: painted {size:?}, centre pixel {px:?}");
+                }
                 state.context.present();
             }
-            WindowEvent::Resized(size) => state.webview.resize(size),
+            WindowEvent::Resized(size) => {
+                state.context.resize(size);
+                state.webview.resize(size)
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor = DevicePoint::new(position.x as f32, position.y as f32);
                 state
                     .webview
-                    .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(state.cursor.into())));
+                    .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(
+                        state.cursor.into(),
+                    )));
             }
-            WindowEvent::MouseInput { state: element_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: element_state,
+                button,
+                ..
+            } => {
                 let action = match element_state {
                     ElementState::Pressed => MouseButtonAction::Down,
                     ElementState::Released => MouseButtonAction::Up,
@@ -333,11 +436,13 @@ impl ApplicationHandler<WakerEvent> for WindowApp {
                     winit::event::MouseButton::Forward => MouseButton::Forward,
                     winit::event::MouseButton::Other(n) => MouseButton::Other(n),
                 };
-                state.webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
-                    action,
-                    button,
-                    state.cursor.into(),
-                )));
+                state
+                    .webview
+                    .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                        action,
+                        button,
+                        state.cursor.into(),
+                    )));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y, mode) = match delta {
@@ -346,11 +451,13 @@ impl ApplicationHandler<WakerEvent> for WindowApp {
                     }
                     MouseScrollDelta::PixelDelta(p) => (p.x, p.y, WheelMode::DeltaPixel),
                 };
-                state.webview.notify_input_event(InputEvent::Wheel(WheelEvent::new(
-                    WheelDelta { x, y, z: 0.0, mode },
-                    state.cursor.into(),
-                    servo::Modifiers::default(),
-                )));
+                state
+                    .webview
+                    .notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                        WheelDelta { x, y, z: 0.0, mode },
+                        state.cursor.into(),
+                        servo::Modifiers::default(),
+                    )));
             }
             _ => {}
         }
