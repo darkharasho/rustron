@@ -51,6 +51,20 @@ jobs:
           git config --system core.longpaths true
           "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
 
+      # The Linux runner was lost (disk/RAM starvation) twice mid-way through the Servo build.
+      # Reclaim ~25 GB of preinstalled SDKs, add swap, and cap parallel rustc jobs.
+      - name: Free disk and add swap (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          sudo swapoff -a || true
+          sudo fallocate -l 8G /swapfile2 && sudo chmod 600 /swapfile2 \
+            && sudo mkswap /swapfile2 && sudo swapon /swapfile2
+          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          df -h / ; free -h
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
