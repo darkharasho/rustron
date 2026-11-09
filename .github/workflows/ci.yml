@@ -102,7 +102,7 @@ jobs:
           cache-directories: ~/.cargo
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --release  # release: shares one Servo compile with the build step below
 
       - name: Build release
         run: cargo build --release -p rustron-host -p rustron-bench
