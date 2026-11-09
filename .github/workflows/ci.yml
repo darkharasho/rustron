@@ -42,6 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Servo's tree has WPT/test262 paths longer than MAX_PATH; cargo's git checkout of the
+      # servo dependency fails on Windows without long paths enabled.
+      - name: Enable long paths (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
+
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
