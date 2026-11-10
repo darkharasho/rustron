@@ -4,6 +4,16 @@ version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 
+# No unit tests in src/. Without this, `cargo test` links all of Servo into two extra test
+# binaries, which runs the Linux CI runner out of memory.
+[lib]
+test = false
+
+[[bin]]
+name = "rustron-host"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 anyhow = "1"
 euclid = "0.22"

@@ -52,7 +52,9 @@ jobs:
           "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
 
       # The Linux runner was lost (disk/RAM starvation) twice mid-way through the Servo build.
-      # Reclaim ~25 GB of preinstalled SDKs, add swap, and cap parallel rustc jobs.
+      # Reclaim ~25 GB of preinstalled SDKs, add swap, and cap parallel rustc jobs. A third run
+      # still lost the runner in the Test step: several GNU ld links of Servo at once. Link with
+      # lld instead, which needs far less memory.
       - name: Free disk and add swap (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -63,6 +65,7 @@ jobs:
           sudo fallocate -l 8G /swapfile2 && sudo chmod 600 /swapfile2 \
             && sudo mkswap /swapfile2 && sudo swapon /swapfile2
           echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
           df -h / ; free -h
 
       - name: Install Linux build dependencies
@@ -70,7 +73,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential ccache cmake curl g++ git gperf m4 \
+            build-essential ccache cmake curl g++ git gperf lld m4 \
             libdbus-1-dev libfreetype6-dev libgl1-mesa-dri libgles2-mesa-dev \
             libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev \
             libvulkan1 libx11-dev libxcb-render0-dev libxcb-shape0-dev \
