@@ -1,8 +1,0 @@
-#!/bin/bash
-# Append memory, swap and free disk to a log every 30 s, for post-mortem on the Linux CI runner.
-while true; do
-  mem=$(free -m | awk '/Mem/ {printf "mem used %sM avail %sM", $3, $7} /Swap/ {printf " swap %sM", $3}')
-  disk=$(df -m / | awk 'NR==2 {print $4}')
-  echo "$(date +%T) $mem disk ${disk}M free"
-  sleep 30
-done

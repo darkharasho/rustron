@@ -1,13 +1,19 @@
 # Rustron M1 CI: build, test and package on Linux and Windows.
 #
-# Prerequisites mirror Servo at rev 75d20deef (the libservo pin in crates/rustron-host):
-#   - Linux apt packages: python/servo/platform/linux_packages/apt/apt_common.txt and
-#     apt_ubuntu_only.txt, minus the gstreamer/wpt-only entries (rustron-host builds servo with
-#     default-features = false, so there is no media backend).
-#   - LLVM/clang 20.1 via KyleMayes/install-llvm-action and LIBCLANG_PATH: .github/workflows/
-#     linux-common.yml (lib dir on Linux) and windows.yml (bin dir on Windows).
-#   - Windows: python/servo/platform/windows.py + windows/winget.json list CMake, LLVM, Ninja
-#     (all preinstalled or installed below) and "moztools" 4.0, which mozjs_sys 153.6.0-2
+# Linux runs on a self-hosted runner (Michael's dev machine, labels self-hosted/Linux/X64/rustron).
+# The 16 GB GitHub-hosted Linux runner was lost mid-way through the Servo build on five runs, with
+# no logs, even with swap, two jobs, lld and a memory-capped cgroup. The self-hosted machine
+# already has Servo's build prerequisites (they were needed for the local Task 4 bench run) and
+# keeps its target dir between runs, so no prerequisite or cache steps run for Linux.
+#
+# The repo is public, so this workflow triggers on push only, never on pull_request: a pull
+# request from a fork must not be able to run code on the self-hosted machine.
+#
+# Windows prerequisites mirror Servo at rev 75d20deef (the libservo pin in crates/rustron-host):
+#   - LLVM/clang 20.1 via KyleMayes/install-llvm-action and LIBCLANG_PATH (bin dir), as in Servo's
+#     .github/workflows/windows.yml.
+#   - python/servo/platform/windows.py + windows/winget.json list CMake, LLVM, Ninja (all
+#     preinstalled or installed below) and "moztools" 4.0, which mozjs_sys 153.6.0-2
 #     (build.rs find_moztools) locates through MOZTOOLS_PATH. The capi job in windows.yml sets
 #     CC/CXX=clang-cl.exe and MOZTOOLS_PATH the same way. WiX and gstreamer are for Servo's own
 #     installer and media, not needed here.
@@ -19,7 +25,6 @@ name: CI
 
 on:
   push:
-  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,20 +32,23 @@ env:
 jobs:
   build:
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - runs-on: [self-hosted, Linux, X64, rustron]
             name: linux
             exe: ""
-          - os: windows-latest
+          - runs-on: windows-latest
             name: windows
             exe: ".exe"
     steps:
+      # No `git clean -ffdx` on the self-hosted runner: it would delete the kept target/ dir.
       - uses: actions/checkout@v4
+        with:
+          clean: ${{ runner.os != 'Linux' }}
 
       # Servo's tree has WPT/test262 paths longer than MAX_PATH; cargo's git checkout of the
       # servo dependency fails on Windows without long paths enabled.
@@ -51,50 +59,17 @@ jobs:
           git config --system core.longpaths true
           "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> $env:GITHUB_ENV
 
-      # The Linux runner was lost (disk/RAM starvation) twice mid-way through the Servo build.
-      # Reclaim ~25 GB of preinstalled SDKs, add swap, and cap parallel rustc jobs. A third run
-      # still lost the runner in the Test step: several GNU ld links of Servo at once. Link with
-      # lld instead, which needs far less memory.
-      - name: Free disk and add swap (Linux)
+      # Leave cores free on the self-hosted dev machine.
+      - name: Limit build jobs (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          sudo docker image prune --all --force || true
-          sudo swapoff -a || true
-          sudo fallocate -l 8G /swapfile2 && sudo chmod 600 /swapfile2 \
-            && sudo mkswap /swapfile2 && sudo swapon /swapfile2
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
-          df -h / ; free -h
-          # A fourth run was lost the same way with lld, so the cause is still unconfirmed. Log
-          # memory and disk for the failure step below, and build in a memory-capped cgroup.
-          nohup .github/scripts/log-resources > /tmp/resources.log 2>&1 &
-          echo "$GITHUB_WORKSPACE/.github/scripts" >> "$GITHUB_PATH"
+        run: echo "CARGO_BUILD_JOBS=12" >> "$GITHUB_ENV"
 
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential ccache cmake curl g++ git gperf lld m4 \
-            libdbus-1-dev libfreetype6-dev libgl1-mesa-dri libgles2-mesa-dev \
-            libglib2.0-dev libharfbuzz-dev liblzma-dev libudev-dev libunwind-dev \
-            libvulkan1 libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxmu-dev libxmu6 libegl1-mesa-dev llvm-dev \
-            xorg-dev libxkbcommon0 libxkbcommon-x11-0 mesa-vulkan-drivers \
-            fonts-lato fonts-liberation fonts-noto-color-emoji fonts-dejavu-core \
-            fonts-dejavu-extra
-
-      - name: Install LLVM and Clang
+      - name: Install LLVM and Clang (Windows)
+        if: runner.os == 'Windows'
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "20.1"
           directory: ${{ runner.temp }}/llvm
-
-      - name: Set LIBCLANG_PATH (Linux)
-        if: runner.os == 'Linux'
-        run: echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
 
       - name: Set LIBCLANG_PATH (Windows)
         if: runner.os == 'Windows'
@@ -126,29 +101,23 @@ jobs:
           rustup show active-toolchain || rustup toolchain install
           rustc --version
 
-      - name: Cache cargo and target
+      # The self-hosted runner keeps target/ in its workspace, so only Windows needs the cache.
+      - name: Cache cargo and target (Windows)
+        if: runner.os == 'Windows'
         uses: Swatinem/rust-cache@v2
         with:
           cache-directories: ~/.cargo
 
-      # release: shares one Servo compile with the build step below. On Linux, `capped`
-      # (.github/scripts) runs cargo in a memory-limited cgroup.
       - name: Test
-        run: ${{ runner.os == 'Linux' && 'capped ' || '' }}cargo test --workspace --release
+        run: cargo test --workspace --release  # release: shares one Servo compile with the build step below
 
       - name: Build release
-        run: ${{ runner.os == 'Linux' && 'capped ' || '' }}cargo build --release -p rustron-host -p rustron-bench
-
-      - name: Resource log and OOM kills (Linux, on failure)
-        if: failure() && runner.os == 'Linux'
-        run: |
-          tail -n 60 /tmp/resources.log || true
-          sudo dmesg | grep -iE 'oom|killed process' | tail -n 20 || true
+        run: cargo build --release -p rustron-host -p rustron-bench
 
       - name: Collect artifact
         shell: bash
         run: |
-          mkdir -p dist
+          rm -rf dist && mkdir -p dist
           cp "target/release/rustron-host${{ matrix.exe }}" "target/release/rustron-bench${{ matrix.exe }}" dist/
 
       - name: Upload artifact
