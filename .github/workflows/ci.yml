@@ -67,6 +67,10 @@ jobs:
           echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
           df -h / ; free -h
+          # A fourth run was lost the same way with lld, so the cause is still unconfirmed. Log
+          # memory and disk for the failure step below, and build in a memory-capped cgroup.
+          nohup .github/scripts/log-resources > /tmp/resources.log 2>&1 &
+          echo "$GITHUB_WORKSPACE/.github/scripts" >> "$GITHUB_PATH"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -127,11 +131,19 @@ jobs:
         with:
           cache-directories: ~/.cargo
 
+      # release: shares one Servo compile with the build step below. On Linux, `capped`
+      # (.github/scripts) runs cargo in a memory-limited cgroup.
       - name: Test
-        run: cargo test --workspace --release  # release: shares one Servo compile with the build step below
+        run: ${{ runner.os == 'Linux' && 'capped ' || '' }}cargo test --workspace --release
 
       - name: Build release
-        run: cargo build --release -p rustron-host -p rustron-bench
+        run: ${{ runner.os == 'Linux' && 'capped ' || '' }}cargo build --release -p rustron-host -p rustron-bench
+
+      - name: Resource log and OOM kills (Linux, on failure)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          tail -n 60 /tmp/resources.log || true
+          sudo dmesg | grep -iE 'oom|killed process' | tail -n 20 || true
 
       - name: Collect artifact
         shell: bash

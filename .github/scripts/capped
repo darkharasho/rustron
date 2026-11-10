@@ -1,0 +1,6 @@
+#!/bin/bash
+# Run a command in a memory-capped cgroup on the Linux CI runner (16 GB RAM). If the Servo build
+# runs out of memory, the kernel kills rustc inside the cgroup, which shows up as a build error
+# with logs, instead of starving the whole runner ("lost communication with the server").
+exec sudo -E systemd-run --scope --quiet -p MemoryMax=12G -p MemorySwapMax=6G \
+  --uid="$(id -u)" --gid="$(id -g)" env "PATH=$PATH" "$@"
